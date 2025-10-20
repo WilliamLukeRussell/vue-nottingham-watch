@@ -1,4 +1,4 @@
-name: Build and deploy Vue JSON
+name: Build & Deploy Vue Nottingham JSON
 
 on:
   workflow_dispatch:
@@ -24,7 +24,8 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Playwright (Chromium)
+      # Install Playwright (Chromium) so scrape.mjs can run
+      - name: Install Playwright
         run: |
           npm init -y
           npm i playwright
@@ -33,13 +34,13 @@ jobs:
       - name: Run scraper
         run: node scrape.mjs
 
-      - name: List output (debug)
-        run: ls -la public || echo "no public dir"
+      - name: Show output (debug)
+        run: ls -la public && head -n 50 public/vue-nottingham.json
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: public   # <- we will write vue-nottingham.json here
+          path: public   # must contain vue-nottingham.json
 
   deploy:
     needs: build
