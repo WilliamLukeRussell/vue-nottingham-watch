@@ -1,16 +1,22 @@
-name: Publish Vue Nottingham JSON
+name: Build and deploy Vue JSON
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"   # every 30 min
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"   # every 30 minutes
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
       - uses: actions/checkout@v4
 
@@ -18,7 +24,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Playwright
+      - name: Install Playwright (Chromium)
         run: |
           npm init -y
           npm i playwright
@@ -27,9 +33,19 @@ jobs:
       - name: Run scraper
         run: node scrape.mjs
 
-      - name: Publish to gh-pages
-        uses: peaceiris/actions-gh-pages@v3
+      - name: List output (debug)
+        run: ls -la public || echo "no public dir"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./public      # <-- publish the /public folder
-          publish_branch: gh-pages
+          path: public   # <- we will write vue-nottingham.json here
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
