@@ -17,33 +17,19 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Install deps
-        run: |
-          npm init -y
-          npm i cheerio
-
       - name: Run scraper
         env:
-          SCRAPINGBEE_KEY: ${{ secrets.SCRAPINGBEE_KEY }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: node scrape.mjs
-
-      - name: Show output (debug)
-        run: ls -la public && (head -n 80 public/vue-nottingham.json || true)
-
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
-
   deploy:
     needs: build
     runs-on: ubuntu-latest
