@@ -1,126 +1,126 @@
-// scrape.mjs — Vue Nottingham via SerpAPI Google Search (parses `showtimes`)
+// scrape.mjs — Vue Nottingham via IMDb (through Jina Reader, no headless, no keys)
+// Publishes: public/vue-nottingham.json + robust even if one URL fails.
+
 import fs from "node:fs/promises";
 
-const SERPAPI_KEY = process.env.SERPAPI_KEY;
+// IMDb cinema id for Vue Nottingham (ci1043282). We'll try a few postcode variants.
+const IMDB_BASES = [
+  "https://www.imdb.com/showtimes/cinema/GB/ci1043282/GB/NG1/",
+  "https://www.imdb.com/showtimes/cinema/GB/ci1043282/GB/NG7/",
+  "https://www.imdb.com/showtimes/cinema/GB/ci1043282/GB/NG8/",
+  "https://www.imdb.com/showtimes/cinema/UK/ci1043282/UK/NG1/",
+  "https://www.imdb.com/showtimes/cinema/UK/ci1043282/UK/NG7/",
+  "https://www.imdb.com/showtimes/cinema/UK/ci1043282/UK/NG8/",
+];
+
+// Use Jina Reader proxy to fetch HTML as plain text (bypasses JS / bot checks)
+const proxify = (url) => `https://r.jina.ai/http://` + url.replace(/^https?:\/\//, "");
 
 // helpers
-const toMins = (hhmm) => {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || "");
+const toMins12 = (t) => {
+  // "10:45 AM" or "9:05PM" -> minutes since midnight
+  const m = t.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
   if (!m) return Number.POSITIVE_INFINITY;
-  return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+  let h = +m[1], min = +m[2];
+  const ap = m[3].toUpperCase();
+  if (ap === "PM" && h !== 12) h += 12;
+  if (ap === "AM" && h === 12) h = 0;
+  return h * 60 + min;
 };
-const pad = (n) => String(n).padStart(2, "0");
-const fmt = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+const toClock24 = (mins) => {
+  mins = ((mins % (24 * 60)) + 24 * 60) % (24 * 60);
+  const h = Math.floor(mins / 60), m = mins % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+};
 
-// fetch Google Search (NOT google_showtimes) and read `showtimes`
-async function fetchShowtimes() {
-  if (!SERPAPI_KEY) throw new Error("Missing SERPAPI_KEY");
-  const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google");
-  url.searchParams.set("q", "Vue Nottingham showtimes");
-  url.searchParams.set("hl", "en");
-  url.searchParams.set("gl", "gb");
-  url.searchParams.set("location", "Nottingham, United Kingdom");
-  url.searchParams.set("api_key", SERPAPI_KEY);
+function parseImdb(html) {
+  // Very tolerant parse:
+  // - Titles appear near <h3>…<a>Title</a>…</h3> or data-testid bits.
+  // - Times are in 12h with AM/PM in the same block.
+  const blocks = html.split(/<h3[^>]*>/i);
+  const showings = [];
 
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`SerpAPI HTTP ${res.status}`);
-  return await res.json();
+  for (const block of blocks) {
+    // title
+    const title =
+      (block.match(/<a[^>]*>([^<]+)<\/a>\s*<\/h3>/i)?.[1] ||
+       block.match(/data-testid="title"[^>]*>([^<]+)</i)?.[1] ||
+       block.match(/<h2[^>]*>([^<]+)<\/h2>/i)?.[1] ||
+       "").trim();
+    if (!title || title.length < 2) continue;
+
+    // times in AM/PM (IMDb lists like "10:45 AM  1:15 PM  9:05 PM")
+    const times = Array.from(block.matchAll(/\b(\d{1,2}:\d{2})\s*(AM|PM)\b/gi))
+      .map(m => `${m[1]} ${m[2].toUpperCase()}`);
+
+    for (const t of times) {
+      showings.push({ film: title, start12: t });
+    }
+  }
+
+  // Normalize to 24h strings for sorting and output
+  const rows = showings
+    .map(s => {
+      const mins = toMins12(s.start12);
+      return mins === Number.POSITIVE_INFINITY ? null : {
+        film: s.film,
+        start: toClock24(mins),  // "HH:MM" 24h
+        _mins: mins
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a._mins - b._mins);
+
+  return rows;
 }
 
 function buildTodayBlock(rows) {
-  return rows.map(r => `${r.start.padStart(5, " ")}  ${r.film}`).join("\n");
+  // "HH:MM  Title" per line
+  return rows.map(r => `${r.start}  ${r.film}`).join("\n");
+}
+
+async function fetchFirstWorking() {
+  for (const base of IMDB_BASES) {
+    try {
+      const url = proxify(base);
+      const res = await fetch(url, { headers: { "accept-language": "en-GB,en" } });
+      if (!res.ok) continue;
+      const html = await res.text();
+      const rows = parseImdb(html);
+      if (rows.length) return { rows, source: base };
+    } catch {}
+  }
+  return { rows: [], source: null };
 }
 
 (async () => {
   const now = new Date();
   const nowM = now.getHours() * 60 + now.getMinutes();
 
-  let today_showings = [];
-  let error = null;
+  const { rows, source } = await fetchFirstWorking();
 
-  try {
-    const data = await fetchShowtimes();
+  // compute nexts (assume 120 min duration)
+  const next_starting = rows.find(r => r._mins > nowM) || null;
 
-    // SerpAPI returns showtimes under data.showtimes[...]
-    // (structure varies: sometimes `theaters[…].movies`, sometimes `movies` at the top)
-    const st = data.showtimes || [];
-    // Try find a block for Vue Nottingham by name/address text
-    // Two shapes exist in docs: day->theaters or day->movies; handle both.
-    for (const dayBlock of st) {
-      // theaters shape
-      if (Array.isArray(dayBlock.theaters)) {
-        const vue = dayBlock.theaters.find(t =>
-          /vue\b/i.test(t.name || "") && /nottingham/i.test(((t.address || "") + " " + (t.name || "")))
-        ) || null;
-        if (vue && Array.isArray(vue.movies)) {
-          for (const mv of vue.movies) {
-            const title = (mv.name || "").trim();
-            const showings = mv.showing || mv.showtimes || [];
-            for (const s of showings) {
-              const times = Array.isArray(s.time) ? s.time : (s.time ? [s.time] : []);
-              const times24 = Array.isArray(s.time_24) ? s.time_24 : (s.time_24 ? [s.time_24] : []);
-              const normalized = (times24.length ? times24 : times).map(t => t.replace(/\s*(am|pm)\s*/i,""));
-              for (const start of normalized) {
-                if (/^\d{1,2}:\d{2}$/.test(start)) {
-                  today_showings.push({ film: title, screen: null, start, end: null });
-                }
-              }
-            }
-          }
-        }
-      }
-      // movies-at-top shape
-      if (Array.isArray(dayBlock.movies)) {
-        for (const mv of dayBlock.movies) {
-          const title = (mv.name || "").trim();
-          const showings = mv.showing || mv.showtimes || [];
-          for (const s of showings) {
-            const times = Array.isArray(s.time) ? s.time : (s.time ? [s.time] : []);
-            const times24 = Array.isArray(s.time_24) ? s.time_24 : (s.time_24 ? [s.time_24] : []);
-            const normalized = (times24.length ? times24 : times).map(t => t.replace(/\s*(am|pm)\s*/i,""));
-            for (const start of normalized) {
-              if (/^\d{1,2}:\d{2}$/.test(start)) {
-                today_showings.push({ film: title, screen: null, start, end: null });
-              }
-            }
-          }
-        }
-      }
-    }
-  } catch (e) {
-    error = String(e?.message || e);
-    console.error("SerpAPI error:", error);
-  }
-
-  // Sort + compute next/finishing
-  today_showings.sort((a, b) => toMins(a.start) - toMins(b.start));
-
-  const next_starting = today_showings.find(s => toMins(s.start) > nowM) || null;
-
-  const withEnds = today_showings.map(s => ({
-    ...s,
-    _startM: toMins(s.start),
-    _endM: toMins(s.start) + 120, // rough duration if end unknown
-  }));
-  const current = withEnds
-    .filter(s => s._startM <= nowM && s._endM > nowM)
-    .sort((a, b) => a._endM - b._endM)[0] || null;
+  const current = rows
+    .map(r => ({ ...r, _end: r._mins + 120 }))
+    .filter(r => r._mins <= nowM && r._end > nowM)
+    .sort((a, b) => a._end - b._end)[0] || null;
 
   const next_finishing = current
-    ? { film: current.film, screen: null, start: fmt(current._startM), end: fmt(current._endM) }
+    ? { film: current.film, screen: null, start: current.start, end: toClock24(current._end) }
     : null;
 
   const out = {
     generated_at: now.toISOString(),
-    ...(error ? { error } : {}),
-    next_starting,
+    source: source || null,
+    next_starting: next_starting ? { film: next_starting.film, screen: null, start: next_starting.start, end: null } : null,
     next_finishing,
-    today_showings,
-    today_block: buildTodayBlock(today_showings),
+    today_showings: rows.map(({ film, start }) => ({ film, screen: null, start, end: null })),
+    today_block: buildTodayBlock(rows)
   };
 
   await fs.mkdir("public", { recursive: true });
   await fs.writeFile("public/vue-nottingham.json", JSON.stringify(out, null, 2));
-  console.log(`✅ Published vue-nottingham.json with ${today_showings.length} rows`);
+  console.log(`✅ Published vue-nottingham.json with ${rows.length} rows from ${out.source || "n/a"}`);
 })();
