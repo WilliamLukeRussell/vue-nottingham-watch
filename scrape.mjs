@@ -1,106 +1,77 @@
-// scrape.mjs — robust + debuggable Vue Nottingham scraper for GitHub Pages
+// scrape.mjs — fetch Vue Nottingham via ScrapingBee (bypasses Cloudflare) and publish JSON
 import fs from "node:fs/promises";
-import { chromium } from "playwright";
+import path from "node:path";
+import * as cheerio from "cheerio"; // we'll install cheerio in the workflow
 
+const API_KEY = process.env.SCRAPINGBEE_KEY || "";
 const VUE_URL = "https://www.myvue.com/cinema/nottingham/whats-on";
 
-const toMins = (hhmm) => {
+function toMins(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || "");
   if (!m) return 1e9;
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-};
+}
 
-async function safeWritePublic(name, contents) {
-  await fs.mkdir("public", { recursive: true });
-  await fs.writeFile(`public/${name}`, contents);
+async function fetchRendered(url) {
+  if (!API_KEY) throw new Error("Missing SCRAPINGBEE_KEY secret");
+  const api = new URL("https://app.scrapingbee.com/api/v1");
+  api.searchParams.set("api_key", API_KEY);
+  api.searchParams.set("url", url);
+  api.searchParams.set("render_js", "true");
+  api.searchParams.set("country_code", "gb");
+  api.searchParams.set("block_resources", "false");
+
+  const res = await fetch(api, { headers: { Accept: "text/html" } });
+  if (!res.ok) throw new Error(`ScrapingBee HTTP ${res.status}`);
+  return await res.text();
 }
 
 (async () => {
   const now = new Date();
   let today_showings = [];
-  let next_starting = null;
-  let next_finishing = null;
-
-  const browser = await chromium.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
-  const page = await browser.newPage({ locale: "en-GB" });
+  let error = null;
 
   try {
-    // Go to Vue Nottingham
-    await page.goto(VUE_URL, { waitUntil: "domcontentloaded" });
+    const html = await fetchRendered(VUE_URL);
 
-    // Try to accept cookies if a banner exists
-    const cookieButtons = [
-      'button:has-text("Accept All")',
-      'button:has-text("Accept all")',
-      'button:has-text("I Accept")',
-      'button:has-text("Agree")',
-      '[aria-label*="Accept"]',
-    ];
-    for (const sel of cookieButtons) {
-      try {
-        const b = page.locator(sel).first();
-        if (await b.count()) { await b.click({ timeout: 1500 }); break; }
-      } catch {}
-    }
+    // Save raw for debugging
+    await fs.mkdir("public", { recursive: true });
+    await fs.writeFile("public/raw.html", html);
 
-    // If there’s a “Today / All Times / Show all” toggle, try clicking it
-    const toggles = [/All Times/i, /Today/i, /Show all/i];
-    for (const re of toggles) {
-      try {
-        const btn = page.getByText(re).first();
-        if (await btn.count()) { await btn.click({ timeout: 1500 }); }
-      } catch {}
-    }
+    const $ = cheerio.load(html);
 
-    // Wait for any signs of showtimes to render
-    const waitSelectors = [
-      "[data-qa='showtime']",
-      "time",
-      "button:has-text(':')",
-      "a:has-text(':')",
-      "text=Screen",
-    ];
-    let loaded = false;
-    for (const sel of waitSelectors) {
-      try {
-        await page.waitForSelector(sel, { timeout: 8000 });
-        loaded = true; break;
-      } catch {}
-    }
-    if (!loaded) await page.waitForTimeout(6000);
+    // Try structured selectors first (tweak as Vue updates DOM)
+    // Titles
+    const cards = $("[data-qa*='movie'],[data-qa*='film'],article,section");
+    const data = [];
 
-    // Save a raw snapshot for debugging
-    await safeWritePublic("raw.html", await page.content());
-    await page.screenshot({ path: "public/snap.png", fullPage: true });
+    cards.each((_, el) => {
+      const $el = $(el);
+      const title =
+        $el.find("[data-qa='movie-title'],[data-qa='film-title'],h2,h3")
+          .first()
+          .text()
+          .trim();
+      if (!title || title.length < 2) return;
 
-    // Strategy A: structured selectors on typical Vue markup
-    let data = await page.evaluate(() => {
-      const out = [];
-      // Try to find film cards/sections
-      const cards = document.querySelectorAll("[data-qa*='movie'], [data-qa*='film'], article, section");
-      cards.forEach(card => {
-        const title =
-          card.querySelector("[data-qa='movie-title'], [data-qa='film-title'], h2, h3")
-            ?.textContent?.trim();
-        if (!title || title.length < 2) return;
+      const screenMatch = $el.text().match(/\bScreen\s+([A-Za-z0-9]+)\b/i);
+      const screen = screenMatch ? screenMatch[1] : null;
 
-        // Screen text (if present anywhere within the card)
-        const screenMatch = (card.innerText.match(/\bScreen\s+([A-Za-z0-9]+)\b/i) || [])[1] || null;
-
-        // Times (try elements likely to contain HH:MM)
-        const timeNodes = card.querySelectorAll("[data-qa='showtime'], time, button, a, span, div");
-        timeNodes.forEach(el => {
-          const t = (el.textContent || "").trim();
-          if (/^\d{1,2}:\d{2}$/.test(t)) out.push({ film: title, screen: screenMatch, start: t, end: null });
-        });
+      // find any child node that looks like "HH:MM"
+      $el.find("*").each((__, node) => {
+        const t = $(node).text().trim();
+        if (/^\d{1,2}:\d{2}$/.test(t)) {
+          data.push({ film: title, screen, start: t, end: null });
+        }
       });
-      return out;
     });
 
-    // Strategy B: text sweep fallback
-    if (!data || data.length === 0) {
-      const bodyText = await page.evaluate(() => document.body.innerText);
+    // Fallback: text sweep if structured selectors miss
+    let results = data;
+    if (results.length === 0) {
+      const bodyText = $("body").text();
       const lines = bodyText.split(/\n+/).map(s => s.trim()).filter(Boolean);
+
       let lastTitle = null;
       for (const line of lines) {
         const looksLikeTitle =
@@ -116,52 +87,51 @@ async function safeWritePublic(name, contents) {
         const screen = screenMatch ? screenMatch[1] : null;
 
         if (times.length >= 2) {
-          (data ||= []).push({ film: lastTitle, screen, start: times[0], end: times[1] });
+          results.push({ film: lastTitle, screen, start: times[0], end: times[1] });
         } else {
-          (data ||= []).push({ film: lastTitle, screen, start: times[0], end: null });
+          results.push({ film: lastTitle, screen, start: times[0], end: null });
         }
       }
     }
 
-    // Build final payload
-    const sorted = (data || [])
+    // Normalize & sort
+    today_showings = results
       .filter(s => /^\d{1,2}:\d{2}$/.test(s.start))
       .sort((a, b) => toMins(a.start) - toMins(b.start));
 
-    const nowM = now.getHours() * 60 + now.getMinutes();
-    today_showings = sorted;
-    const next = sorted.find(s => toMins(s.start) > nowM) || null;
-
-    const withEnds = sorted.map(s => ({
-      ...s,
-      _startM: toMins(s.start),
-      _endM: s.end ? toMins(s.end) : toMins(s.start) + 120,
-    }));
-    const current = withEnds
-      .filter(s => s._startM <= nowM && s._endM > nowM)
-      .sort((a, b) => a._endM - b._endM)[0] || null;
-
-    const pad = n => String(n).padStart(2, "0");
-    const fmt = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
-
-    next_starting = next || null;
-    next_finishing = current
-      ? { film: current.film, screen: current.screen, start: fmt(current._startM), end: fmt(current._endM) }
-      : null;
-
-  } catch (err) {
-    console.error("Scrape error:", err?.message || err);
-  } finally {
-    await browser.close();
+  } catch (e) {
+    error = String(e?.message || e);
+    console.error("Scrape error:", error);
   }
+
+  // Compute nexts (assume 120m if end unknown)
+  const nowM = now.getHours() * 60 + now.getMinutes();
+  const next_starting = today_showings.find(s => toMins(s.start) > nowM) || null;
+
+  const withEnds = today_showings.map(s => ({
+    ...s,
+    _startM: toMins(s.start),
+    _endM: s.end ? toMins(s.end) : toMins(s.start) + 120,
+  }));
+  const current = withEnds
+    .filter(s => s._startM <= nowM && s._endM > nowM)
+    .sort((a, b) => a._endM - b._endM)[0] || null;
+
+  const pad = n => String(n).padStart(2, "0");
+  const fmt = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
+  const next_finishing = current
+    ? { film: current.film, screen: current.screen, start: fmt(current._startM), end: fmt(current._endM) }
+    : null;
 
   const out = {
     generated_at: now.toISOString(),
+    ...(error ? { error } : {}),
     next_starting,
     next_finishing,
     today_showings,
   };
 
-  await safeWritePublic("vue-nottingham.json", JSON.stringify(out, null, 2));
+  await fs.mkdir("public", { recursive: true });
+  await fs.writeFile(path.join("public", "vue-nottingham.json"), JSON.stringify(out, null, 2));
   console.log(`✅ Published vue-nottingham.json with ${today_showings.length} showings`);
 })();
