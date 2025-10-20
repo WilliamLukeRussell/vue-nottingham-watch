@@ -3,7 +3,7 @@ name: Build & Deploy Vue JSON
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "*/30 * * * *"   # every 30 min
 
 permissions:
   contents: read
@@ -17,19 +17,19 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Use Playwright container (already has all system deps + Chromium)
+    container: mcr.microsoft.com/playwright:v1.47.2-jammy
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: 'npm'
-
-      - name: Install Playwright (lib deps + Chromium)
+      # Create minimal Node project & install playwright (creates lockfile too)
+      - name: Install Node deps
         run: |
+          node -v
+          npm -v
           npm init -y
           npm i playwright@latest
-          npx playwright install --with-deps chromium
 
       - name: Run scraper
         run: node scrape.mjs
