@@ -3,7 +3,7 @@ name: Build & Deploy Vue JSON
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/30 * * * *"   # every 30 min
 
 permissions:
   contents: read
@@ -20,17 +20,20 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Playwright (Chromium + system deps)
+      - name: Install deps
         run: |
           npm init -y
-          npm i playwright@1.56.1
-          npx playwright install --with-deps chromium
+          npm i cheerio
 
       - name: Run scraper
+        env:
+          SCRAPINGBEE_KEY: ${{ secrets.SCRAPINGBEE_KEY }}
         run: node scrape.mjs
 
       - name: Show output (debug)
