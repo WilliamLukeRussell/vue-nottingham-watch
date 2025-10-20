@@ -1,9 +1,9 @@
-name: Build and deploy Vue JSON
+name: Deploy test JSON to GitHub Pages
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:       # run manually
   schedule:
-    - cron: "*/30 * * * *"   # every 30 minutes
+    - cron: "0 * * * *"    # hourly
 
 permissions:
   contents: read
@@ -19,27 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Install Playwright (Chromium)
-        run: |
-          npm init -y
-          npm i playwright
-          npx playwright install --with-deps chromium
-
-      - name: Run scraper
-        run: node scrape.mjs
-
-      - name: List output (debug)
-        run: ls -la public || echo "no public dir"
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+      - run: node scrape.mjs
+      - uses: actions/upload-pages-artifact@v3
         with:
-          path: public   # <- we will write vue-nottingham.json here
+          path: public
 
   deploy:
     needs: build
@@ -47,5 +33,4 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
