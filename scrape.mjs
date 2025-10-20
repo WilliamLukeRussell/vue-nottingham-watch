@@ -1,126 +1,87 @@
-// scrape.mjs — fetch Vue Nottingham via ScrapingBee (bypasses Cloudflare) and publish JSON
+// scrape.mjs — Vue Nottingham showtimes via SerpAPI (no screen numbers)
+// Publishes: public/vue-nottingham.json (+ today_block for easy listing)
 import fs from "node:fs/promises";
-import path from "node:path";
-import * as cheerio from "cheerio"; // we'll install cheerio in the workflow
 
-const API_KEY = process.env.SCRAPINGBEE_KEY || "";
-const VUE_URL = "https://www.myvue.com/cinema/nottingham/whats-on";
+const SERPAPI_KEY = process.env.SERPAPI_KEY;
+const QUERY = "Vue Nottingham showtimes";
 
 function toMins(hhmm) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || "");
-  if (!m) return 1e9;
+  if (!m) return Number.POSITIVE_INFINITY;
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
 }
 
-async function fetchRendered(url) {
-  if (!API_KEY) throw new Error("Missing SCRAPINGBEE_KEY secret");
-  const api = new URL("https://app.scrapingbee.com/api/v1");
-  api.searchParams.set("api_key", API_KEY);
-  api.searchParams.set("url", url);
-  api.searchParams.set("render_js", "true");
-  api.searchParams.set("country_code", "gb");
-  api.searchParams.set("block_resources", "false");
+async function fetchShowtimes() {
+  if (!SERPAPI_KEY) throw new Error("Missing SERPAPI_KEY");
+  const url = new URL("https://serpapi.com/search.json");
+  url.searchParams.set("engine", "google_showtimes");
+  url.searchParams.set("q", QUERY);
+  url.searchParams.set("hl", "en");   // UI language
+  url.searchParams.set("gl", "gb");   // results region
+  url.searchParams.set("api_key", SERPAPI_KEY);
 
-  const res = await fetch(api, { headers: { Accept: "text/html" } });
-  if (!res.ok) throw new Error(`ScrapingBee HTTP ${res.status}`);
-  return await res.text();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`SerpAPI HTTP ${res.status}`);
+  return await res.json();
+}
+
+function buildTodayBlock(rows) {
+  // Pretty one-text list for Widgy if you don’t want to loop arrays
+  // Format: "HH:MM  Title" each on a new line
+  return rows.map(r => `${r.start.padStart(5, " ")}  ${r.film}`).join("\n");
 }
 
 (async () => {
   const now = new Date();
+  const nowM = now.getHours() * 60 + now.getMinutes();
+
   let today_showings = [];
   let error = null;
 
   try {
-    const html = await fetchRendered(VUE_URL);
+    const data = await fetchShowtimes();
 
-    // Save raw for debugging
-    await fs.mkdir("public", { recursive: true });
-    await fs.writeFile("public/raw.html", html);
+    // SerpAPI returns an array of theaters; pick the Vue Nottingham one
+    const theaters = data.showtimes?.theaters || data.theaters || [];
+    const vue = theaters.find(t =>
+      /vue\b/i.test(t.name || "") && /nottingham/i.test(((t.address || "") + " " + (t.name || ""))
+    )) || theaters[0];
 
-    const $ = cheerio.load(html);
-
-    // Try structured selectors first (tweak as Vue updates DOM)
-    // Titles
-    const cards = $("[data-qa*='movie'],[data-qa*='film'],article,section");
-    const data = [];
-
-    cards.each((_, el) => {
-      const $el = $(el);
-      const title =
-        $el.find("[data-qa='movie-title'],[data-qa='film-title'],h2,h3")
-          .first()
-          .text()
-          .trim();
-      if (!title || title.length < 2) return;
-
-      const screenMatch = $el.text().match(/\bScreen\s+([A-Za-z0-9]+)\b/i);
-      const screen = screenMatch ? screenMatch[1] : null;
-
-      // find any child node that looks like "HH:MM"
-      $el.find("*").each((__, node) => {
-        const t = $(node).text().trim();
-        if (/^\d{1,2}:\d{2}$/.test(t)) {
-          data.push({ film: title, screen, start: t, end: null });
-        }
-      });
-    });
-
-    // Fallback: text sweep if structured selectors miss
-    let results = data;
-    if (results.length === 0) {
-      const bodyText = $("body").text();
-      const lines = bodyText.split(/\n+/).map(s => s.trim()).filter(Boolean);
-
-      let lastTitle = null;
-      for (const line of lines) {
-        const looksLikeTitle =
-          /[A-Za-z]/.test(line) &&
-          !/\bScreen\b/i.test(line) &&
-          !/^\d{1,2}:\d{2}(\s+\d{1,2}:\d{2})?$/.test(line);
-        if (looksLikeTitle) lastTitle = line;
-
-        const times = Array.from(line.matchAll(/\b(\d{1,2}:\d{2})\b/g)).map(m => m[1]);
-        if (!times.length || !lastTitle) continue;
-
-        const screenMatch = line.match(/\bScreen\s+([A-Za-z0-9]+)\b/i);
-        const screen = screenMatch ? screenMatch[1] : null;
-
-        if (times.length >= 2) {
-          results.push({ film: lastTitle, screen, start: times[0], end: times[1] });
-        } else {
-          results.push({ film: lastTitle, screen, start: times[0], end: null });
+    if (vue && vue.movies) {
+      for (const mv of vue.movies) {
+        const title = (mv.name || "").trim();
+        const slots = (mv.showing || mv.showtimes || []).map(s => (s.time_24 || s.time || "").trim());
+        const times = slots.filter(t => /^\d{1,2}:\d{2}$/.test(t));
+        for (const start of times) {
+          today_showings.push({ film: title, screen: null, start, end: null });
         }
       }
     }
-
-    // Normalize & sort
-    today_showings = results
-      .filter(s => /^\d{1,2}:\d{2}$/.test(s.start))
-      .sort((a, b) => toMins(a.start) - toMins(b.start));
-
   } catch (e) {
     error = String(e?.message || e);
-    console.error("Scrape error:", error);
+    console.error("SerpAPI error:", error);
   }
 
-  // Compute nexts (assume 120m if end unknown)
-  const nowM = now.getHours() * 60 + now.getMinutes();
+  // sort and compute nexts
+  today_showings.sort((a, b) => toMins(a.start) - toMins(b.start));
+
   const next_starting = today_showings.find(s => toMins(s.start) > nowM) || null;
 
   const withEnds = today_showings.map(s => ({
     ...s,
     _startM: toMins(s.start),
-    _endM: s.end ? toMins(s.end) : toMins(s.start) + 120,
+    _endM: toMins(s.start) + 120, // assume ~120 min where end unknown
   }));
+
   const current = withEnds
     .filter(s => s._startM <= nowM && s._endM > nowM)
     .sort((a, b) => a._endM - b._endM)[0] || null;
 
   const pad = n => String(n).padStart(2, "0");
   const fmt = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
+
   const next_finishing = current
-    ? { film: current.film, screen: current.screen, start: fmt(current._startM), end: fmt(current._endM) }
+    ? { film: current.film, screen: null, start: fmt(current._startM), end: fmt(current._endM) }
     : null;
 
   const out = {
@@ -129,9 +90,10 @@ async function fetchRendered(url) {
     next_starting,
     next_finishing,
     today_showings,
+    today_block: buildTodayBlock(today_showings),
   };
 
   await fs.mkdir("public", { recursive: true });
-  await fs.writeFile(path.join("public", "vue-nottingham.json"), JSON.stringify(out, null, 2));
-  console.log(`✅ Published vue-nottingham.json with ${today_showings.length} showings`);
+  await fs.writeFile("public/vue-nottingham.json", JSON.stringify(out, null, 2));
+  console.log(`✅ Published vue-nottingham.json with ${today_showings.length} rows`);
 })();
