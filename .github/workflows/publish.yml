@@ -17,13 +17,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # Use Playwright container (already has all system deps + Chromium)
     container: mcr.microsoft.com/playwright:v1.47.2-jammy
 
     steps:
       - uses: actions/checkout@v4
 
-      # Create minimal Node project & install playwright (creates lockfile too)
       - name: Install Node deps
         run: |
           node -v
