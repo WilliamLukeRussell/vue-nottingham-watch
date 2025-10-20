@@ -23,26 +23,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: 'npm'
 
-      # ✅ Faster, reliable Playwright install (with all Linux deps)
-      - name: Install Playwright browsers
-        uses: microsoft/playwright-github-action@v1
-        with:
-          version: 1.47.2   # or omit to use latest
-
-      - name: Install deps (none needed, but keep npm init so node runs cleanly)
+      - name: Install Playwright (lib deps + Chromium)
         run: |
           npm init -y
-          npm i playwright
+          npm i playwright@latest
+          npx playwright install --with-deps chromium
 
       - name: Run scraper
         run: node scrape.mjs
 
-      # Optional: show what we produced (helpful for debugging)
-      - name: Show output
+      - name: Show output (debug)
         run: ls -la public && (head -n 80 public/vue-nottingham.json || true)
 
-      # Ship the /public folder to GitHub Pages
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
