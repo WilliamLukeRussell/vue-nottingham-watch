@@ -1,23 +1,26 @@
-// scrape.mjs — Vue Nottingham showtimes via SerpAPI (no screen numbers)
-// Publishes: public/vue-nottingham.json (+ today_block for easy listing)
+// scrape.mjs — Vue Nottingham via SerpAPI Google Search (parses `showtimes`)
 import fs from "node:fs/promises";
 
 const SERPAPI_KEY = process.env.SERPAPI_KEY;
-const QUERY = "Vue Nottingham showtimes";
 
-function toMins(hhmm) {
+// helpers
+const toMins = (hhmm) => {
   const m = /^(\d{1,2}):(\d{2})$/.exec(hhmm || "");
   if (!m) return Number.POSITIVE_INFINITY;
   return parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
-}
+};
+const pad = (n) => String(n).padStart(2, "0");
+const fmt = (m) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
 
+// fetch Google Search (NOT google_showtimes) and read `showtimes`
 async function fetchShowtimes() {
   if (!SERPAPI_KEY) throw new Error("Missing SERPAPI_KEY");
   const url = new URL("https://serpapi.com/search.json");
-  url.searchParams.set("engine", "google_showtimes");
-  url.searchParams.set("q", QUERY);
-  url.searchParams.set("hl", "en");   // UI language
-  url.searchParams.set("gl", "gb");   // results region
+  url.searchParams.set("engine", "google");
+  url.searchParams.set("q", "Vue Nottingham showtimes");
+  url.searchParams.set("hl", "en");
+  url.searchParams.set("gl", "gb");
+  url.searchParams.set("location", "Nottingham, United Kingdom");
   url.searchParams.set("api_key", SERPAPI_KEY);
 
   const res = await fetch(url);
@@ -26,8 +29,6 @@ async function fetchShowtimes() {
 }
 
 function buildTodayBlock(rows) {
-  // Pretty one-text list for Widgy if you don’t want to loop arrays
-  // Format: "HH:MM  Title" each on a new line
   return rows.map(r => `${r.start.padStart(5, " ")}  ${r.film}`).join("\n");
 }
 
@@ -41,19 +42,49 @@ function buildTodayBlock(rows) {
   try {
     const data = await fetchShowtimes();
 
-    // SerpAPI returns an array of theaters; pick the Vue Nottingham one
-    const theaters = data.showtimes?.theaters || data.theaters || [];
-    const vue = theaters.find(t =>
-      /vue\b/i.test(t.name || "") && /nottingham/i.test(((t.address || "") + " " + (t.name || ""))
-    )) || theaters[0];
-
-    if (vue && vue.movies) {
-      for (const mv of vue.movies) {
-        const title = (mv.name || "").trim();
-        const slots = (mv.showing || mv.showtimes || []).map(s => (s.time_24 || s.time || "").trim());
-        const times = slots.filter(t => /^\d{1,2}:\d{2}$/.test(t));
-        for (const start of times) {
-          today_showings.push({ film: title, screen: null, start, end: null });
+    // SerpAPI returns showtimes under data.showtimes[...]
+    // (structure varies: sometimes `theaters[…].movies`, sometimes `movies` at the top)
+    const st = data.showtimes || [];
+    // Try find a block for Vue Nottingham by name/address text
+    // Two shapes exist in docs: day->theaters or day->movies; handle both.
+    for (const dayBlock of st) {
+      // theaters shape
+      if (Array.isArray(dayBlock.theaters)) {
+        const vue = dayBlock.theaters.find(t =>
+          /vue\b/i.test(t.name || "") && /nottingham/i.test(((t.address || "") + " " + (t.name || "")))
+        ) || null;
+        if (vue && Array.isArray(vue.movies)) {
+          for (const mv of vue.movies) {
+            const title = (mv.name || "").trim();
+            const showings = mv.showing || mv.showtimes || [];
+            for (const s of showings) {
+              const times = Array.isArray(s.time) ? s.time : (s.time ? [s.time] : []);
+              const times24 = Array.isArray(s.time_24) ? s.time_24 : (s.time_24 ? [s.time_24] : []);
+              const normalized = (times24.length ? times24 : times).map(t => t.replace(/\s*(am|pm)\s*/i,""));
+              for (const start of normalized) {
+                if (/^\d{1,2}:\d{2}$/.test(start)) {
+                  today_showings.push({ film: title, screen: null, start, end: null });
+                }
+              }
+            }
+          }
+        }
+      }
+      // movies-at-top shape
+      if (Array.isArray(dayBlock.movies)) {
+        for (const mv of dayBlock.movies) {
+          const title = (mv.name || "").trim();
+          const showings = mv.showing || mv.showtimes || [];
+          for (const s of showings) {
+            const times = Array.isArray(s.time) ? s.time : (s.time ? [s.time] : []);
+            const times24 = Array.isArray(s.time_24) ? s.time_24 : (s.time_24 ? [s.time_24] : []);
+            const normalized = (times24.length ? times24 : times).map(t => t.replace(/\s*(am|pm)\s*/i,""));
+            for (const start of normalized) {
+              if (/^\d{1,2}:\d{2}$/.test(start)) {
+                today_showings.push({ film: title, screen: null, start, end: null });
+              }
+            }
+          }
         }
       }
     }
@@ -62,7 +93,7 @@ function buildTodayBlock(rows) {
     console.error("SerpAPI error:", error);
   }
 
-  // sort and compute nexts
+  // Sort + compute next/finishing
   today_showings.sort((a, b) => toMins(a.start) - toMins(b.start));
 
   const next_starting = today_showings.find(s => toMins(s.start) > nowM) || null;
@@ -70,15 +101,11 @@ function buildTodayBlock(rows) {
   const withEnds = today_showings.map(s => ({
     ...s,
     _startM: toMins(s.start),
-    _endM: toMins(s.start) + 120, // assume ~120 min where end unknown
+    _endM: toMins(s.start) + 120, // rough duration if end unknown
   }));
-
   const current = withEnds
     .filter(s => s._startM <= nowM && s._endM > nowM)
     .sort((a, b) => a._endM - b._endM)[0] || null;
-
-  const pad = n => String(n).padStart(2, "0");
-  const fmt = m => `${pad(Math.floor(m/60))}:${pad(m%60)}`;
 
   const next_finishing = current
     ? { film: current.film, screen: null, start: fmt(current._startM), end: fmt(current._endM) }
