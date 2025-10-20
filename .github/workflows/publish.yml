@@ -1,15 +1,12 @@
 name: Build & Deploy Vue JSON
-
 on:
   workflow_dispatch:
   schedule:
     - cron: "*/30 * * * *"   # every 30 min
-
 permissions:
   contents: read
   pages: write
   id-token: write
-
 concurrency:
   group: "pages"
   cancel-in-progress: true
@@ -23,8 +20,6 @@ jobs:
         with:
           node-version: 20
       - name: Run scraper
-        env:
-          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
         run: node scrape.mjs
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
