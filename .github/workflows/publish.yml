@@ -1,4 +1,4 @@
-name: Build & Deploy Vue Nottingham JSON
+name: Build & Deploy Vue JSON
 
 on:
   workflow_dispatch:
@@ -24,23 +24,29 @@ jobs:
         with:
           node-version: 20
 
-      # Install Playwright (Chromium) so scrape.mjs can run
-      - name: Install Playwright
+      # ✅ Faster, reliable Playwright install (with all Linux deps)
+      - name: Install Playwright browsers
+        uses: microsoft/playwright-github-action@v1
+        with:
+          version: 1.47.2   # or omit to use latest
+
+      - name: Install deps (none needed, but keep npm init so node runs cleanly)
         run: |
           npm init -y
           npm i playwright
-          npx playwright install --with-deps chromium
 
       - name: Run scraper
         run: node scrape.mjs
 
-      - name: Show output (debug)
-        run: ls -la public && head -n 50 public/vue-nottingham.json
+      # Optional: show what we produced (helpful for debugging)
+      - name: Show output
+        run: ls -la public && (head -n 80 public/vue-nottingham.json || true)
 
+      # Ship the /public folder to GitHub Pages
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: public   # must contain vue-nottingham.json
+          path: public
 
   deploy:
     needs: build
@@ -48,5 +54,4 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - name: Deploy to GitHub Pages
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
