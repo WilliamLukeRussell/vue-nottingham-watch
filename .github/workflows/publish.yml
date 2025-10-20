@@ -1,49 +1,50 @@
 name: Build & Deploy Vue JSON
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "*/30 * * * *"   # every 30 min
+  workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: "pages"
-  cancel-in-progress: true
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    container: mcr.microsoft.com/playwright:v1.56.1-jammy   # <-- match the version
+  build:
+    runs-on: ubuntu-latest
 
-    steps:
-      - uses: actions/checkout@v4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Install Node deps
-        run: |
-          node -v
-          npm -v
-          npm init -y
-          npm i playwright@1.56.1                            # <-- match the version
+      - name: Install Playwright (Chromium + system deps)
+        run: |
+          npm init -y
+          npm i playwright@1.56.1
+          npx playwright install --with-deps chromium
 
-      - name: Run scraper
-        run: node scrape.mjs
+      - name: Run scraper
+        run: node scrape.mjs
 
-      - name: Show output (debug)
-        run: ls -la public && (head -n 80 public/vue-nottingham.json || true)
+      - name: Show output (debug)
+        run: ls -la public && (head -n 80 public/vue-nottingham.json || true)
 
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: public
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-    steps:
-      - uses: actions/deploy-pages@v4
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/deploy-pages@v4
